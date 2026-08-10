@@ -4,6 +4,8 @@ A 60 fps, high-resolution rendering pipeline on top of [MiniMax H3](https://hugg
 
 H3 generates **768p, 24 fps, 5–15 s clips with a jointly generated stereo soundtrack**. This repo turns that into something you can upload: correct 24→60 fps conversion, optional super-resolution to 1080p/1440p/2160p, banding control, 10-bit output, and exact A/V sync.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Hvkki/minimax/blob/main/Giggsdance.ipynb)
+
 > **Before anything else, read [NOTICE.md](NOTICE.md).** The H3 licence does not grant rights in the EU, UK, South Korea or USA, and the restriction covers the model's **outputs**, not just its weights.
 
 ---
@@ -71,6 +73,35 @@ modal run run.py --describe                                     # dump pipeline 
 Turn it on with `--resolution 1440p` when you want it; expect roughly 4x the post-processing time.
 
 ---
+
+
+## In a notebook (Colab, Jupyter, Kaggle)
+
+[Open the notebook in Colab](https://colab.research.google.com/github/Hvkki/minimax/blob/main/Giggsdance.ipynb) and run the cells, or do it by hand:
+
+```python
+# Cell 1 -- the ! prefix matters. Without it the cell is parsed as
+# Python and you get "SyntaxError: invalid syntax".
+!git clone -q https://github.com/Hvkki/minimax.git
+%cd minimax
+!pip install -q modal numpy pillow
+
+# Cell 2 -- credentials from modal.com/settings/tokens
+import os
+os.environ["MODAL_TOKEN_ID"] = "ak-..."
+os.environ["MODAL_TOKEN_SECRET"] = "as-..."
+
+# Cell 3 -- free, no GPU, no account
+import notebook
+notebook.dry_run()
+
+# Cell 4 -- render, and preview it inline
+path, report = notebook.render()
+```
+
+`modal run` is a shell command and `@app.local_entrypoint()` is CLI-only, so `notebook.py` drives Modal through its Python API inside an `app.run()` block instead. `notebook.check_setup()` reports exactly which of the three usual things is missing (package, modal, credentials).
+
+Nothing runs on the notebook's own machine, so a free Colab runtime is enough — the GPU is Modal's.
 
 ## Cost
 
