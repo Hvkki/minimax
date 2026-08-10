@@ -35,6 +35,8 @@ modal setup
 modal run run.py
 ```
 
+> **Modal runs local files.** It does not clone from GitHub and needs no GitHub integration. Pasting this repo's URL into the Modal dashboard returns `Bad Request: Unsupported URL`, and giving one to the CLI returns `Invalid object reference`. Clone first, then point `modal run` at the file — Modal uploads your local code itself. (You can run it from any directory; Modal puts the script's own folder on `sys.path`. Just keep `run.py` next to `giggsdance/`.)
+
 That one command does everything: checks the Modal Volume for weights, downloads them if missing (~90 GB, on cheap CPU, skipped forever after), fetches the upscaler only if you asked for upscaling, renders a clip, writes `output.mp4` next to the file, and prints exactly what it cost. Every step is idempotent, so re-running is safe and skips whatever is already done.
 
 Free sanity check first, if you like — no GPU, no weights, no Modal account:

@@ -32,6 +32,22 @@ Everything is idempotent, so re-running is safe and skips whatever is done.
     # validate the whole pipeline locally, free, no GPU and no weights
     python run.py --dry-run
 
+IMPORTANT -- Modal runs LOCAL files. It does not clone from GitHub, and no
+GitHub integration is needed or wanted here. Pasting a repository URL into the
+Modal dashboard fails with "Bad Request: Unsupported URL", and handing one to
+the CLI fails differently ("Invalid object reference"). The path is always:
+
+    git clone https://github.com/Hvkki/minimax.git
+    cd minimax
+    pip install -r requirements.txt
+    modal run run.py
+
+Modal adds the script's own directory to sys.path (exactly as `python
+some/script.py` does), so `modal run /path/to/minimax/run.py` also works from
+anywhere. What matters is only that `run.py` stays next to the `giggsdance/`
+package -- this file imports it and ships it to the container via
+`add_local_python_source`.
+
 Powered by MiniMax H3. Read NOTICE.md before use -- the licence excludes the EU,
 UK, South Korea and USA, and the restriction covers the model's *outputs*, not
 just its weights. If you publish the result, mark it as AI-generated.
@@ -47,16 +63,27 @@ from pathlib import Path
 
 import modal
 
-from giggsdance.constraints import SRC_FPS, frames_for_duration, resolve_canvas
-from giggsdance.stages.encode import EncodeSettings, build_encode_command, write_wav
-from giggsdance.stages.interpolate import plan_interpolation
-from giggsdance.stages.upscale import (
-    blend_tiles,
-    pick_scale,
-    plan_geometry,
-    plan_tiles,
-    resolve_target,
-)
+try:
+    from giggsdance.constraints import SRC_FPS, frames_for_duration, resolve_canvas
+    from giggsdance.stages.encode import EncodeSettings, build_encode_command, write_wav
+    from giggsdance.stages.interpolate import plan_interpolation
+    from giggsdance.stages.upscale import (
+        blend_tiles,
+        pick_scale,
+        plan_geometry,
+        plan_tiles,
+        resolve_target,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - startup guard
+    raise SystemExit(
+        f"could not import the 'giggsdance' package ({exc}).\n\n"
+        "run.py needs the giggsdance/ package sitting next to it. Modal runs your "
+        "LOCAL files and never fetches from GitHub, so clone the whole repo:\n\n"
+        "    git clone https://github.com/Hvkki/minimax.git\n"
+        "    cd minimax\n"
+        "    pip install -r requirements.txt\n"
+        "    modal run run.py\n"
+    ) from exc
 
 MODEL_ID = "MiniMaxAI/MiniMax-H3"
 WEIGHTS_DIR = "/weights"
