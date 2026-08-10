@@ -251,3 +251,56 @@ def test_oversized_tile_degrades_to_one_tile():
 def test_invalid_overlap_raises():
     with pytest.raises(ValueError):
         plan_tiles(512, 512, 128, 128)
+
+
+
+# ---------------------------------------------------------------------------
+# resolve_target: "native" means no super-resolution runs at all
+# ---------------------------------------------------------------------------
+
+
+def test_native_crops_h3s_canvas_to_exact_sixteen_by_nine():
+    """1344x768 is 1.75:1, so players letterbox it. A crop is free; a scale is not."""
+    from giggsdance.stages.upscale import resolve_target
+
+    assert resolve_target("native", 1344, 768) == (1344, 756)
+    width, height = resolve_target("native", 1344, 768)
+    assert width / height == pytest.approx(16 / 9, abs=1e-4)
+
+
+def test_native_leaves_far_from_widescreen_canvases_alone():
+    """Cropping a square to 16:9 would discard 44% of the frame."""
+    from giggsdance.stages.upscale import resolve_target
+
+    assert resolve_target("native", 768, 768) == (768, 768)
+    assert resolve_target("native", 1504, 640) == (1504, 640)
+    assert resolve_target("native", 1024, 768) == (1024, 768)
+
+
+def test_native_handles_portrait():
+    from giggsdance.stages.upscale import resolve_target
+
+    assert resolve_target("native", 768, 1344) == (756, 1344)
+
+
+def test_named_resolutions_follow_canvas_orientation():
+    from giggsdance.stages.upscale import resolve_target
+
+    assert resolve_target("1440p", 1344, 768) == (2560, 1440)
+    assert resolve_target("1440p", 768, 1344) == (1440, 2560)
+
+
+def test_unknown_resolution_name_raises():
+    from giggsdance.stages.upscale import resolve_target
+
+    with pytest.raises(ValueError, match="unknown resolution"):
+        resolve_target("4k", 1344, 768)
+
+
+def test_native_never_triggers_a_super_resolution_pass():
+    """The whole cost saving depends on pick_scale returning 1 for native."""
+    from giggsdance.stages.upscale import resolve_target
+
+    out_w, out_h = resolve_target("native", 1344, 768)
+    crop_h = plan_geometry(1344, 768, out_w, out_h, 2).crop_height
+    assert pick_scale(crop_h, out_h) == 1

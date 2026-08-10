@@ -61,6 +61,45 @@ def pick_scale(crop_height: int, out_height: int) -> int:
     return 2 if out_height / crop_height <= 2.0 + 1e-6 else 4
 
 
+def resolve_target(
+    resolution: str,
+    canvas_width: int,
+    canvas_height: int,
+    near_tolerance: float = 0.05,
+) -> tuple[int, int]:
+    """Resolve a resolution name against the generated canvas.
+
+    ``"native"`` means run no super-resolution at all -- keep H3's own pixels.
+    Since a crop is free while a scale is not, native still trims to an exact
+    16:9 (or 9:16) when the canvas is already *close* to it, because H3's 16:9
+    canvas is really 1.75:1 and would otherwise be letterboxed by every player.
+    1344x768 becomes 1344x756: 12 rows gone, nothing resampled.
+
+    A canvas that is nowhere near 16:9 (square, 21:9, ...) is left completely
+    untouched, since cropping a square to 16:9 would throw away 44% of it.
+
+    Any named resolution returns that resolution, oriented to match the canvas so
+    a vertical generation renders vertical rather than being cropped to a strip.
+    """
+    if resolution != "native":
+        if resolution not in RESOLUTIONS:
+            raise ValueError(
+                f"unknown resolution {resolution!r}; "
+                f"expected 'native' or one of {list(RESOLUTIONS)}"
+            )
+        return target_for_source(canvas_width, canvas_height, RESOLUTIONS[resolution])
+
+    portrait = canvas_height > canvas_width
+    wide = 16 / 9
+    actual = canvas_height / canvas_width if portrait else canvas_width / canvas_height
+    if abs(actual - wide) / wide > near_tolerance:
+        return canvas_width, canvas_height          # leave it entirely alone
+
+    if portrait:
+        return min(canvas_width, int(round(canvas_height * 9 / 16)) & ~1), canvas_height
+    return canvas_width, min(canvas_height, int(round(canvas_width * 9 / 16)) & ~1)
+
+
 def target_for_source(
     src_width: int,
     src_height: int,

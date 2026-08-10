@@ -27,6 +27,7 @@ from .interpolate import (
     plan_interpolation,
 )
 from .upscale import (
+    RESOLUTIONS,
     UHD_2K,
     UHD_4K,
     Geometry,
@@ -39,10 +40,12 @@ from .upscale import (
     plan_tiles,
     process_frame,
     resize_lanczos,
+    resolve_target,
     target_for_source,
 )
 
 __all__ = [
+    "RESOLUTIONS",
     "EncodeSettings",
     "encode_frames",
     "probe",
@@ -63,5 +66,6 @@ __all__ = [
     "plan_tiles",
     "process_frame",
     "resize_lanczos",
+    "resolve_target",
     "target_for_source",
 ]

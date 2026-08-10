@@ -19,38 +19,54 @@ H3 generates **768p, 24 fps, 5–15 s clips with a jointly generated stereo soun
 | `frameio.py` — 16-bit round-trip | **verified** |
 | `prompt.py` — Context-IR-style prompts | **verified** |
 | `stages/generate.py` — the H3 call | **written, never executed** |
+| `run.py` — one-command orchestrator | wiring verified, generation untested |
 
-That last row matters. The H3 generation call is written against the published diffusers integration and model card, but running it needs ~124 GB of weights and a large GPU. If something breaks, it is almost certainly there — run `modal run bench_one_video.py::benchmark --print-doc` to dump the pipeline's real signature.
+The H3 generation call is written against the published diffusers integration and model card, but running it needs ~124 GB of weights and a large GPU, so it has never been executed. If something breaks, it is almost certainly there — run `modal run run.py --describe` to dump the pipeline's real signature and compare it against what we send.
 
 ---
 
 ## Quick start
 
 ```bash
+git clone https://github.com/Hvkki/minimax.git && cd minimax
 pip install -r requirements.txt
 modal setup
 
-# 0. FREE. No GPU, no weights, no Modal. Validates the whole pipeline.
-python bench_one_video.py --dry-run
-
-# 1. Weights into a Modal Volume (~90 GB, once, on CPU — not GPU rates)
-modal run bench_one_video.py::download_weights
-
-# 2. Measure the cold-start cost once, so you can budget properly
-modal run bench_one_video.py::probe_load
-
-# 3. Render one clip and get exact numbers (defaults stay under $1)
-modal run bench_one_video.py::benchmark
+modal run run.py
 ```
 
-Do step 0 first. It is free and it catches plumbing bugs.
+That one command does everything: checks the Modal Volume for weights, downloads them if missing (~90 GB, on cheap CPU, skipped forever after), fetches the upscaler only if you asked for upscaling, renders a clip, writes `output.mp4` next to the file, and prints exactly what it cost. Every step is idempotent, so re-running is safe and skips whatever is already done.
 
-Super-resolution is **off by default** (`--resolution native`) because it measured at ~84% of post-processing time. Turn it on only when you want it:
+Free sanity check first, if you like — no GPU, no weights, no Modal account:
 
 ```bash
-modal run bench_one_video.py::download_upscaler          # 67 MB, once
-modal run bench_one_video.py::benchmark --resolution 1440p --steps 24
+python run.py --dry-run
 ```
+
+Common variations:
+
+```bash
+modal run run.py --prompt "a paper boat drifting down a rain-filled gutter"
+modal run run.py --duration-s 10 --steps 16
+modal run run.py --resolution 1440p --steps 24 --budget-usd 3   # upscaling on
+modal run run.py --probe-only                                   # measure cold start only
+modal run run.py --describe                                     # dump pipeline signature
+```
+
+`run.py` deliberately exposes a **single** Modal entrypoint. Modal auto-runs one entrypoint but treats several as ambiguous, so extra entrypoints would make bare `modal run run.py` stop and ask which — the diagnostics are flags instead.
+
+`bench_one_video.py` is the same pipeline with granular, separately invokable steps if you want to drive each stage yourself.
+
+### Super-resolution is off by default
+
+`--resolution native` runs **no** super-resolution model. It keeps H3's own pixels and only crops 1344x768 to 1344x756 for exact 16:9 (a crop is free, a scale is not). Measured effect:
+
+| | with upscaler | native |
+|---|---|---|
+| pipeline time | 6.3s | **1.0s** |
+| upscale share | 84.3% | **1.2%** |
+
+Turn it on with `--resolution 1440p` when you want it; expect roughly 4x the post-processing time.
 
 ---
 
@@ -64,7 +80,7 @@ Modal bills `gpu="B200+"` at the **B200 rate of $6.25/hr** ($0.001736/s) even wh
 | **$1.00** | **9.6 min** |
 | $2.00 | 19.2 min |
 
-`--budget-usd` converts your budget into a hard container timeout, so an overrun gets killed rather than billed.
+`--budget-usd` converts your budget into a hard container timeout, so an overrun gets killed rather than billed. Default is $1.00.
 
 **The wildcard is the cold start.** Loading ~124 GB (61.7 GB transformer + 62.1 GB Qwen3-VL conditioner) happens before a single frame is generated, and nobody can predict it without measuring — that is what `probe_load` is for. A warm container within `scaledown_window` (300 s) skips it entirely, so **batching clips is the single biggest saving**.
 
@@ -122,8 +138,9 @@ One workflow in bf16 is ~124 GB.
 ## Tests
 
 ```bash
-python -m pytest tests/test_pipeline_math.py -v   # 36 tests, ~1s, no GPU
+python -m pytest tests/test_pipeline_math.py -v   # 42 tests, ~1s, no GPU
 python tests/smoke_render.py                     # end-to-end, needs ffmpeg, ~8s
+python run.py --dry-run                          # full pipeline, synthetic frames
 ```
 
 `smoke_render.py` renders a real file at 640x360 and asserts frame count, fps, bit depth, colour tags, A/V agreement and audio format. Keep it small — a full 4K smoke test takes ~13 minutes on CPU and proves nothing extra.
