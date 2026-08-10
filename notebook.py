@@ -53,6 +53,60 @@ def _in_notebook() -> bool:
         return False
 
 
+def detect_environment() -> str:
+    """Return 'kaggle', 'colab', 'jupyter' or 'shell'."""
+    if Path("/kaggle").exists() or os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
+        return "kaggle"
+    if "google.colab" in str(os.environ.get("PYTHONPATH", "")):
+        return "colab"
+    try:
+        import google.colab  # noqa: F401
+
+        return "colab"
+    except ModuleNotFoundError:
+        pass
+    return "jupyter" if _in_notebook() else "shell"
+
+
+def default_output_dir() -> Path:
+    """Where to write results so the platform actually surfaces them.
+
+    Kaggle only exposes ``/kaggle/working`` in a notebook's Output tab, so
+    anything written elsewhere is invisible and lost when the session ends.
+    """
+    working = Path("/kaggle/working")
+    if working.is_dir():
+        return working
+    return Path.cwd()
+
+
+def load_kaggle_secrets(
+    token_id: str = "MODAL_TOKEN_ID",
+    token_secret: str = "MODAL_TOKEN_SECRET",
+) -> bool:
+    """Copy Modal credentials out of Kaggle Secrets into the environment.
+
+    Preferable to pasting tokens into a cell: a public Kaggle notebook shows its
+    source, and saved cell output can leak them. Add-ons -> Secrets.
+    """
+    try:
+        from kaggle_secrets import UserSecretsClient
+    except ModuleNotFoundError:
+        return False
+
+    client = UserSecretsClient()
+    loaded = 0
+    for name in (token_id, token_secret):
+        try:
+            value = client.get_secret(name)
+        except Exception:
+            continue
+        if value:
+            os.environ[name] = value
+            loaded += 1
+    return loaded == 2
+
+
 def check_setup(verbose: bool = True) -> dict:
     """Report what is and is not ready, without raising.
 
@@ -78,18 +132,30 @@ def check_setup(verbose: bool = True) -> dict:
     except ModuleNotFoundError:
         status["modal"] = False
 
+    environment = detect_environment()
+    status["environment"] = environment
+
+    if environment == "kaggle" and not os.environ.get("MODAL_TOKEN_ID"):
+        load_kaggle_secrets()
+
     has_env = bool(os.environ.get("MODAL_TOKEN_ID") and os.environ.get("MODAL_TOKEN_SECRET"))
     has_file = (Path.home() / ".modal.toml").exists()
     status["credentials"] = has_env or has_file
     status["credentials_source"] = (
         "environment" if has_env else "~/.modal.toml" if has_file else None
     )
+
+    from shutil import which
+
+    status["ffmpeg"] = which("ffmpeg") is not None
+    status["output_dir"] = str(default_output_dir())
     status["ready"] = bool(status["package"] and status["modal"] and status["credentials"])
 
     if verbose:
         def mark(ok):
             return "OK  " if ok else "MISSING"
 
+        print(f"environment: {environment}   output -> {status['output_dir']}")
         print(f"[{mark(status['package'])}] giggsdance package"
               f"{'  v' + str(status.get('package_version')) if status['package'] else ''}")
         if not status["package"]:
@@ -98,12 +164,21 @@ def check_setup(verbose: bool = True) -> dict:
               f"{'  v' + str(status.get('modal_version')) if status['modal'] else ''}")
         if not status["modal"]:
             print("        !pip install -q modal")
+        print(f"[{mark(status['ffmpeg'])}] ffmpeg (only needed for dry_run)")
+        if not status["ffmpeg"]:
+            print("        !apt-get -qq install -y ffmpeg")
         print(f"[{mark(status['credentials'])}] Modal credentials"
               f"{'  (' + str(status['credentials_source']) + ')' if status['credentials'] else ''}")
         if not status["credentials"]:
-            print("        get a token pair at https://modal.com/settings/tokens then:")
-            print('        os.environ["MODAL_TOKEN_ID"] = "ak-..."')
-            print('        os.environ["MODAL_TOKEN_SECRET"] = "as-..."')
+            print("        get a token pair at https://modal.com/settings/tokens")
+            if environment == "kaggle":
+                print("        Kaggle: Add-ons -> Secrets, add MODAL_TOKEN_ID and")
+                print("        MODAL_TOKEN_SECRET, then call load_kaggle_secrets()")
+                print("        Also: Settings -> Internet must be ON, or nothing")
+                print("        can reach Modal or PyPI at all.")
+            else:
+                print('        os.environ["MODAL_TOKEN_ID"] = "ak-..."')
+                print('        os.environ["MODAL_TOKEN_SECRET"] = "as-..."')
         print()
         print("ready" if status["ready"] else "not ready -- fix the above first")
     return status
@@ -155,7 +230,7 @@ def render(
     seed: int = 0,
     aspect_ratio: str = "16:9",
     budget_usd: float = 1.00,
-    out: str = "output.mp4",
+    out: str | None = None,
     force_download: bool = False,
     show: bool = True,
 ):
@@ -176,6 +251,11 @@ def render(
     prompt = prompt or pipeline.DEFAULT_PROMPT
     rate = pipeline.USD_PER_SECOND
     max_seconds = int(budget_usd / rate)
+
+    # Default into the directory the platform actually shows the user.
+    out_path = Path(out) if out else default_output_dir() / "output.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out = str(out_path)
 
     canvas = pipeline.resolve_canvas(aspect_ratio)
     num_frames = pipeline.frames_for_duration(duration_s)

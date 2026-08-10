@@ -75,7 +75,20 @@ Turn it on with `--resolution 1440p` when you want it; expect roughly 4x the pos
 ---
 
 
-## In a notebook (Colab, Jupyter, Kaggle)
+## In a notebook (Kaggle, Colab, Jupyter)
+
+Ready-made notebooks — pick one:
+
+| Platform | Notebook |
+|---|---|
+| **Kaggle** | [`Giggsdance_Kaggle.ipynb`](Giggsdance_Kaggle.ipynb) — File → Import Notebook, or upload it |
+| **Colab** | [`Giggsdance.ipynb`](https://colab.research.google.com/github/Hvkki/minimax/blob/main/Giggsdance.ipynb) |
+
+**On Kaggle, two settings matter before you run anything:** *Settings → Internet* must be **ON** (off by default, and nothing can reach Modal or PyPI without it), and *Settings → Accelerator* should be **None** — Kaggle's own GPU is not used, so attaching one only burns your quota.
+
+Kaggle's 16 GB T4/P100, ~30 GB RAM and disk quota cannot hold H3's ~124 GB of weights; even the int8 path needs ~75 GB of host RAM. So Kaggle is the client and **Modal supplies the GPU**. Credentials come from *Add-ons → Secrets* (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`) rather than being typed into a cell, and output is written to `/kaggle/working` so it shows up in the Output tab.
+
+### By hand
 
 [Open the notebook in Colab](https://colab.research.google.com/github/Hvkki/minimax/blob/main/Giggsdance.ipynb) and run the cells, or do it by hand:
 
