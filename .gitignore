@@ -1,0 +1,50 @@
+# Secrets -- never commit API keys. Use environment variables or Modal Secrets.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+
+# Model weights and checkpoints (tens of GB -- these live in a Modal Volume)
+*.pth
+*.safetensors
+*.ckpt
+*.pkl
+*.bin
+weights/
+upscalers/
+MiniMax-H3/
+
+# Rendered output and intermediates
+*.mp4
+*.webm
+*.mov
+*.wav
+*.flac
+frames/
+work/
+out/
+outputs/
+dryrun*.mp4
+giggsdance_bench*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

@@ -1,0 +1,22 @@
+# Local development and testing.
+#
+# The GPU runtime is defined in bench_one_video.py's modal.Image, not here --
+# torch there comes from the cu130 index because gpu="B200+" can land on a B300,
+# which requires CUDA 13.1+.
+#
+# These are enough to run the free dry run and the unit tests.
+
+modal>=0.64.0
+numpy>=1.24
+pillow>=10.0
+pytest>=8.0
+
+# Needed only when running H3 locally rather than on Modal.
+# MiniMax H3 support lives in diffusers main, not a tagged release.
+#   pip install git+https://github.com/huggingface/diffusers.git
+#   pip install torch --index-url https://download.pytorch.org/whl/cu130
+#   pip install transformers>=4.57.0 accelerate safetensors sentencepiece av
+#   pip install spandrel==0.4.2          # optional, super-resolution
+#   pip install huggingface_hub[hf_transfer]
+#
+# ffmpeg must be on PATH (built with libx265 and the deband/noise filters).
