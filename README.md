@@ -27,6 +27,12 @@ The H3 generation call is written against the published diffusers integration an
 
 ---
 
+## Budget warning
+
+Modal's free tier is **$30/month, but only about $1 is available until a payment method is added**. Self-hosting H3 does not fit in $1: ~90 GB of weights must be downloaded and held, and ~124 GB loaded into GPU memory on every cold start *before a single frame exists*. The model load alone can eat most of a dollar.
+
+With the full $30 unlocked, everything here is comfortable. On $1, use [MiniMax's hosted API](https://platform.minimax.io/) instead — no weights, no load, no storage, no territory restriction, and you get `H3-Context-IR` and native 2K, neither of which is open source. This repo's prompt builder, 60 fps conversion, upscaling and encoding all still work on top of API output.
+
 ## Quick start
 
 ```bash
@@ -77,20 +83,26 @@ Turn it on with `--resolution 1440p` when you want it; expect roughly 4x the pos
 
 ## Fastest path: Modal Notebooks (no token needed)
 
-Modal has **no feature that runs a GitHub repo from a URL**. Pasting one into the dashboard returns `Bad Request: Unsupported URL`; giving one to the CLI returns `Invalid object reference`. Modal executes code from your local filesystem — or from a notebook running inside Modal.
+At [modal.com/notebooks](https://modal.com/notebooks) use **Import notebook → From URL** and paste:
 
-That last option is the least friction. Open **[modal.com/notebooks](https://modal.com/notebooks)**, create a notebook, and paste **one cell**:
-
-```python
-!git clone -q https://github.com/Hvkki/minimax.git /root/minimax && cd /root/minimax && pip install -q pytest && modal run doctor.py
+```
+https://github.com/Hvkki/minimax/blob/main/Giggsdance_Modal.ipynb
 ```
 
-You are already authenticated inside a Modal notebook, so **there is no token to paste**. That command downloads the weights, runs the tests, boots a GPU, loads H3, verifies the call signature, prints what it cost, and exits.
+That dialog imports a **notebook**, so it needs a link to a `.ipynb` file. Pasting the repository root (`https://github.com/Hvkki/minimax`) is what produces `Bad Request: Unsupported URL`. If the `blob` link is rejected, use the raw form:
 
-Then render:
+```
+https://raw.githubusercontent.com/Hvkki/minimax/main/Giggsdance_Modal.ipynb
+```
+
+Inside a Modal notebook you are already authenticated, so **there is no token to paste anywhere**. Set the notebook's own hardware to **CPU** — the GPU work happens in separate Modal functions, so a GPU attached to the notebook would idle while still billing.
+
+Then run the cells: a free dry run, a no-GPU check, the full GPU check, and the render.
+
+Prefer a single cell in a blank notebook? This is equivalent:
 
 ```python
-!cd /root/minimax && modal run run.py
+!git clone -q https://github.com/Hvkki/minimax.git /root/minimax && cd /root/minimax && pip install -q pytest && modal run doctor.py --skip-gpu
 ```
 
 ### One command, anywhere
