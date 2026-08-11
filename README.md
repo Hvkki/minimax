@@ -75,7 +75,58 @@ Turn it on with `--resolution 1440p` when you want it; expect roughly 4x the pos
 ---
 
 
-## In a notebook (Kaggle, Colab, Jupyter)
+## Fastest path: Modal Notebooks (no token needed)
+
+Modal has **no feature that runs a GitHub repo from a URL**. Pasting one into the dashboard returns `Bad Request: Unsupported URL`; giving one to the CLI returns `Invalid object reference`. Modal executes code from your local filesystem — or from a notebook running inside Modal.
+
+That last option is the least friction. Open **[modal.com/notebooks](https://modal.com/notebooks)**, create a notebook, and paste **one cell**:
+
+```python
+!git clone -q https://github.com/Hvkki/minimax.git /root/minimax && cd /root/minimax && pip install -q pytest && modal run doctor.py
+```
+
+You are already authenticated inside a Modal notebook, so **there is no token to paste**. That command downloads the weights, runs the tests, boots a GPU, loads H3, verifies the call signature, prints what it cost, and exits.
+
+Then render:
+
+```python
+!cd /root/minimax && modal run run.py
+```
+
+### One command, anywhere
+
+```bash
+modal run doctor.py
+```
+
+Five steps, then it stops — nothing rendered, nothing left running:
+
+| Step | What it does |
+|---|---|
+| 1 | local environment: modal version, package, credentials |
+| 2 | downloads ~90 GB of weights into a Volume, **skipped if already there** |
+| 3 | runs the unit tests **inside the container**, not just on your machine |
+| 4 | boots a B200, loads H3 (~124 GB), checks our call against the pipeline's real signature |
+| 5 | prints a PASS/FAIL table, the spend, and the next command |
+
+Step 4 is the valuable one: it catches a diffusers signature drift for the price of a model load instead of halfway through a paid render.
+
+`modal run doctor.py --skip-gpu` does steps 1–3 only, so it costs almost nothing.
+
+### Tokens
+
+**None are needed for the weights.** `MiniMaxAI/MiniMax-H3` is a public, ungated repo (`gated: false`), so downloads are anonymous. The only credential is your Modal token, and inside Modal Notebooks even that is automatic.
+
+If you want a Hugging Face token attached anyway, use a Modal Secret — never a literal in a cell:
+
+```bash
+modal secret create hf-token HF_TOKEN=hf_xxx
+GIGGSDANCE_SECRETS=hf-token modal run doctor.py
+```
+
+Anything named in `GIGGSDANCE_SECRETS` is attached to every function and arrives as environment variables.
+
+## In another notebook (Kaggle, Colab, Jupyter)
 
 Ready-made notebooks — pick one:
 
