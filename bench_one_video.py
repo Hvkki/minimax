@@ -971,7 +971,21 @@ def _report(result, probe, round_trip, out_path, budget_usd=DEFAULT_BUDGET_USD):
 
 def dry_run(resolution="native", fps=60, duration_s=5.0, out="dryrun.mp4"):
     """Exercise every stage except H3 with synthetic frames at low resolution."""
+    import shutil
+
     import numpy as np
+
+    for tool in ("ffmpeg", "ffprobe"):
+        if shutil.which(tool) is None:
+            raise SystemExit(
+                f"{tool} is not on PATH, and the dry run needs it to encode.\n\n"
+                "  Debian/Ubuntu/Colab:  apt-get install -y ffmpeg\n"
+                "  Kaggle:               already installed\n"
+                "  macOS:                brew install ffmpeg\n\n"
+                "It must be built with libx265 and the deband/noise filters.\n"
+                "Note: the GPU path installs ffmpeg inside the Modal image, so "
+                "this is only needed for the local dry run."
+            )
 
     print("DRY RUN -- synthetic frames, no GPU, no weights, $0")
 

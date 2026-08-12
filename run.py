@@ -56,6 +56,7 @@ just its weights. If you publish the result, mark it as AI-generated.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -91,8 +92,50 @@ UPSCALER_DIR = "/upscalers"
 MODEL_PATH = f"{WEIGHTS_DIR}/MiniMax-H3"
 
 # Modal's B200 rate. gpu="B200+" may land on a B300 but is billed as a B200.
-USD_PER_SECOND = 6.25 / 3600.0
 DEFAULT_BUDGET_USD = 1.00
+
+# Per-second rates. B200 is Modal's published $6.25/hr. gpu="B200+" may run on a
+# B300 but is billed as a B200. The B300 figure is a third-party listing, NOT from
+# Modal's own pricing page -- confirm it before relying on the cost tables.
+GPU_RATES = {
+    "B200": 6.25 / 3600.0,
+    "B200+": 6.25 / 3600.0,
+    "B300": 7.10 / 3600.0,
+}
+GPU_VRAM_GB = {"B200": 180, "B200+": 180, "B300": 288}
+UNVERIFIED_RATES = {"B300"}
+
+# Measured from the Hugging Face file manifest, not from documentation.
+# The docs' "61.7 GB / 62.1 GB" figures are low; these are the real on-disk sizes.
+COMPONENT_GB = {
+    "transformer": 66.28,
+    "transformer_ref": 66.28,
+    "text_encoder": 66.73,
+    "vae": 10.42,
+    "audio_vae": 0.61,
+    "tokenizer": 0.01,
+    "processor": 0.01,
+}
+SHARED_GB = sum(COMPONENT_GB[k] for k in ("text_encoder", "vae", "audio_vae", "tokenizer", "processor"))
+ONE_WORKFLOW_GB = SHARED_GB + COMPONENT_GB["transformer"]        # ~144 GB
+BOTH_WORKFLOWS_GB = ONE_WORKFLOW_GB + COMPONENT_GB["transformer_ref"]  # ~210 GB
+
+GPU = os.environ.get("GIGGSDANCE_GPU", "B300")
+USD_PER_SECOND = GPU_RATES.get(GPU, GPU_RATES["B200"])
+
+
+def gpu_for(workflows: set[str]) -> str:
+    """Pick a GPU that can actually hold the requested workflows.
+
+    One workflow is ~144 GB of weights. On a 180 GB B200 that leaves only ~36 GB
+    for activations, which is tight for video latents. Both partitions together
+    are ~210 GB and do not fit a B200 at all, so anything needing both is forced
+    onto a B300 (288 GB).
+    """
+    if os.environ.get("GIGGSDANCE_GPU"):
+        return os.environ["GIGGSDANCE_GPU"]
+    needs_both = {"t2va", "fl2va"} & workflows and "ref2va" in workflows
+    return "B300" if needs_both else GPU
 
 UPSCALERS = {
     2: ("RealESRGAN_x2plus.pth",
@@ -103,7 +146,21 @@ UPSCALERS = {
 
 # What a complete t2va/fl2va checkpoint must contain. Used to decide whether the
 # Volume already holds usable weights, so a re-run does not re-download 90 GB.
-REQUIRED_PARTS = ("transformer", "text_encoder", "vae", "audio_vae", "tokenizer")
+SHARED_PARTS = ("text_encoder", "vae", "audio_vae", "tokenizer")
+
+
+def required_parts(workflow: str = "t2va") -> tuple[str, ...]:
+    """Components that must be on disk for a workflow to load.
+
+    ref2va needs ``transformer_ref`` rather than ``transformer``, so the
+    "already downloaded?" check has to be workflow-aware -- otherwise a Volume
+    holding only the t2va partition looks complete to a ref2va run.
+    """
+    if workflow == "ref2va":
+        return SHARED_PARTS + ("transformer_ref",)
+    if workflow == "both":
+        return SHARED_PARTS + ("transformer", "transformer_ref")
+    return SHARED_PARTS + ("transformer",)
 
 DEFAULT_PROMPT = (
     "integrated_multimodal_description: [Shot 1] Cinematic wide shot, slow push in. "
@@ -150,16 +207,22 @@ upscaler_volume = modal.Volume.from_name("giggsdance-upscalers", create_if_missi
 def ensure_weights(force: bool = False, workflow: str = "t2va"):
     """Download H3 only if the Volume does not already have it.
 
-    Only the components t2va/fl2va need. ``transformer_ref/`` is another 61.7 GB
-    and is required solely for ref2va (omni-reference) generation.
+    Sizes measured from the real file manifest, not the docs:
+
+        shared (text_encoder + vae + audio_vae + tokenizer)   ~77.8 GB
+        transformer/      (t2va, fl2va)                        66.3 GB
+        transformer_ref/  (ref2va)                             66.3 GB
+
+    So one workflow is ~144 GB on disk and both are ~210 GB.
     """
     from huggingface_hub import snapshot_download
 
     root = Path(MODEL_PATH)
+    parts = required_parts(workflow)
 
     def survey():
         found = {}
-        for part in REQUIRED_PARTS:
+        for part in parts:
             directory = root / part
             if directory.is_dir():
                 size = sum(f.stat().st_size for f in directory.rglob("*") if f.is_file())
@@ -168,23 +231,33 @@ def ensure_weights(force: bool = False, workflow: str = "t2va"):
         return found
 
     present = survey()
-    if not force and len(present) == len(REQUIRED_PARTS):
+    if not force and len(present) == len(parts):
         total = sum(present.values())
         print(f"weights already present: {total / 1e9:.1f} GB -- skipping download")
         return {"downloaded": False, "gb": total / 1e9, "seconds": 0.0}
 
     if present:
-        missing = [p for p in REQUIRED_PARTS if p not in present]
+        missing = [p for p in parts if p not in present]
         print(f"incomplete checkpoint (missing {missing}); resuming download")
     else:
         print("no weights found; downloading ~90 GB (one time, on CPU)")
 
+    # Deliberately no bare "*.json" / "*.txt": fnmatch lets "*" cross directory
+    # separators, so those patterns also match FL2VA/**, Ref2VA/**, assets/ and
+    # docs/, dragging in ~69 MB of stray files including a second
+    # model_index.json that can confuse loading. Verified against the real
+    # 280-file manifest: these patterns fetch 61 files and 0 strays.
     patterns = [
-        "modular_model_index.json", "model_index.json", "*.json", "*.txt",
+        "modular_model_index.json", "model_index.json",
         "text_encoder/*", "tokenizer/*", "processor/*",
         "vae/*", "audio_vae/*", "scheduler/*", "audio_scheduler/*",
     ]
-    patterns.append("transformer_ref/*" if workflow == "ref2va" else "transformer/*")
+    if workflow == "ref2va":
+        patterns.append("transformer_ref/*")
+    elif workflow == "both":
+        patterns += ["transformer/*", "transformer_ref/*"]
+    else:
+        patterns.append("transformer/*")
 
     started = time.time()
     snapshot_download(MODEL_ID, local_dir=MODEL_PATH,
@@ -198,7 +271,7 @@ def ensure_weights(force: bool = False, workflow: str = "t2va"):
     for part, size in sorted(final.items()):
         print(f"  {part:16} {size / 1e9:7.2f} GB")
 
-    still_missing = [p for p in REQUIRED_PARTS if p not in final]
+    still_missing = [p for p in parts if p not in final]
     if still_missing:
         raise RuntimeError(f"download finished but {still_missing} are still missing")
     return {"downloaded": True, "gb": total / 1e9, "seconds": elapsed}
@@ -230,10 +303,10 @@ def ensure_upscaler(scale: int):
 
 @app.cls(
     image=image,
-    gpu="B200+",
+    gpu=GPU,
     volumes={WEIGHTS_DIR: weights_volume, UPSCALER_DIR: upscaler_volume},
     timeout=2 * 60 * 60,
-    memory=180 * 1024,
+    memory=200 * 1024,
     min_containers=0,      # never pay for idle: a warm B200 is ~$150/day
     scaledown_window=300,  # but reuse the container for 5 min of back-to-back runs
 )
@@ -252,15 +325,22 @@ class Renderer:
         print(f"GPU: {self.gpu_name} ({self.gpu_vram:.0f} GB), "
               f"torch {torch.__version__}, CUDA {torch.version.cuda}")
 
+        self.workflow = os.environ.get("GIGGSDANCE_WORKFLOW", "t2va")
         source = MODEL_PATH if Path(MODEL_PATH).exists() else MODEL_ID
-        print(f"loading H3 from {source} "
-              f"(~124 GB: 61.7 transformer + 62.1 Qwen3-VL conditioner)")
+        print(f"loading H3 [{self.workflow}] from {source} "
+              f"(~{ONE_WORKFLOW_GB:.0f} GB: {COMPONENT_GB['transformer']:.1f} transformer "
+              f"+ {COMPONENT_GB['text_encoder']:.1f} Qwen3-VL + {COMPONENT_GB['vae']:.1f} VAE)")
 
         self.manager = ComponentsManager()
         self.pipe = ModularPipeline.from_pretrained(
             source, components_manager=self.manager
         )
-        self.pipe.load_components(workflow="t2va", dtype=torch.bfloat16)
+        if self.workflow == "both":
+            # Both transformer partitions resident: ~210 GB, needs a B300.
+            self.pipe.load_components(workflow="t2va", dtype=torch.bfloat16)
+            self.pipe.load_components(workflow="ref2va", dtype=torch.bfloat16)
+        else:
+            self.pipe.load_components(workflow=self.workflow, dtype=torch.bfloat16)
 
         # 124 GB fits resident on a B200 (180 GB) or B300 (288 GB), so keep a
         # large activation margin rather than staging through host RAM.
@@ -301,6 +381,7 @@ class Renderer:
         preset: str = "veryfast",
         tile: int = 512,
         overlap: int = 48,
+        reference_paths: list | None = None,
     ) -> dict:
         import numpy as np
 
@@ -412,20 +493,33 @@ class Renderer:
 
     # -- internals -----------------------------------------------------
 
-    def _generate(self, prompt, num_frames, width, height, steps, seed):
+    def _generate(self, prompt, num_frames, width, height, steps, seed,
+                  reference_paths=None):
         """NOTE: this is the one part of the repo never executed by the author."""
         import numpy as np
 
-        results = self.pipe(
+        kwargs = dict(
             prompt=prompt,
             num_frames=num_frames,
-            height=height,
-            width=width,
             num_inference_steps=steps,
             generator=self.torch.Generator().manual_seed(int(seed)),
             output=["videos", "audio", "sampling_rate"],
             output_type="pt",
         )
+        if reference_paths:
+            from giggsdance.references import ReferenceSet, to_diffusers
+
+            ordered = [(kind, path) for kind, path in reference_paths]
+            references = to_diffusers(ReferenceSet(order=ordered))
+            kwargs["references"] = references
+            # References are encoded at their own resolution and do not bind the
+            # generated canvas, so height/width are left to H3's own default.
+            print(f"conditioning on {len(references)} reference(s), in order")
+        else:
+            kwargs["height"] = height
+            kwargs["width"] = width
+
+        results = self.pipe(**kwargs)
         videos = results["videos"][0]
         audio = results["audio"]
         audio = audio[0] if isinstance(audio, (list, tuple)) else audio
@@ -533,6 +627,10 @@ def main(
     force_download: bool = False,
     probe_only: bool = False,
     describe: bool = False,
+    images: str = "",
+    videos: str = "",
+    audios: str = "",
+    refs: str = "",
 ):
     """Do everything: fetch what is missing, render one clip, report the cost.
 
@@ -554,6 +652,45 @@ def main(
         _probe_only()
         return
 
+    # -- references, validated locally so a bad set costs nothing -------
+    from giggsdance.references import ReferenceError, build_reference_set
+
+    def split(value):
+        return [x.strip() for x in value.split(",") if x.strip()]
+
+    try:
+        reference_set = build_reference_set(
+            images=split(images), videos=split(videos),
+            audios=split(audios), mixed=split(refs),
+        )
+    except ReferenceError as exc:
+        raise SystemExit(f"reference set rejected before spending anything:\n  {exc}")
+
+    missing = [path for _, path in reference_set.order
+               if "://" not in path and not Path(path).exists()]
+    if missing:
+        raise SystemExit(f"reference files not found: {missing}")
+
+    workflow = reference_set.workflow
+    if not reference_set.is_empty:
+        print(f"references: {reference_set.summary()} "
+              f"({reference_set.total}/12) -> workflow {workflow}")
+        for index, (kind, path) in enumerate(reference_set.order, start=1):
+            print(f"   {index:2}. {kind:5} {path}")
+        print("   order is semantic: it sets the <Picture N>/<Video N>/<Audio N>")
+        print("   labels and the shared rotary clock. Reordering is a new request.")
+
+    chosen_gpu = gpu_for({workflow})
+    rate = GPU_RATES.get(chosen_gpu, USD_PER_SECOND)
+    os.environ["GIGGSDANCE_WORKFLOW"] = workflow
+
+    weights_gb = BOTH_WORKFLOWS_GB if workflow == "both" else ONE_WORKFLOW_GB
+    print(f"gpu: {chosen_gpu} ({GPU_VRAM_GB.get(chosen_gpu, '?')} GB VRAM) "
+          f"at ${rate * 3600:.2f}/hr; weights ~{weights_gb:.0f} GB")
+    if chosen_gpu in UNVERIFIED_RATES:
+        print(f"   NOTE: the {chosen_gpu} rate is a third-party figure, not from")
+        print("   Modal's pricing page. Confirm it before trusting the costs below.")
+
     canvas = resolve_canvas(aspect_ratio)
     num_frames = frames_for_duration(duration_s)
     out_w, out_h = resolve_target(resolution, canvas.width, canvas.height)
@@ -561,16 +698,16 @@ def main(
     scale = pick_scale(crop_h, out_h)
     plan_frames = plan_interpolation(num_frames, SRC_FPS, float(fps)).num_dst_frames
 
-    max_seconds = int(budget_usd / USD_PER_SECOND)
+    max_seconds = int(budget_usd / rate)
     print(f"plan:    {num_frames} frames @24fps ({num_frames / 24:.3f}s) at {canvas}")
     print(f"         -> {plan_frames} frames @{fps}fps at {out_w}x{out_h}")
     print(f"         -> {'no super-resolution' if scale <= 1 else f'{scale}x super-resolution'}"
           f", {steps} steps")
-    print(f"budget:  ${budget_usd:.2f} = {max_seconds}s of B200 time "
+    print(f"budget:  ${budget_usd:.2f} = {max_seconds}s on {chosen_gpu} "
           f"({max_seconds / 60:.1f} min), enforced as a hard timeout\n")
 
     print("[1/3] weights")
-    weights_info = ensure_weights.remote(force=force_download)
+    weights_info = ensure_weights.remote(force=force_download, workflow=workflow)
     if weights_info["downloaded"]:
         print(f"      fetched {weights_info['gb']:.1f} GB in "
               f"{weights_info['seconds'] / 60:.1f} min")
@@ -583,23 +720,24 @@ def main(
         print(f"      {info.get('name')} ready")
 
     print("[3/3] render")
-    renderer = Renderer.with_options(timeout=max_seconds)()
+    renderer = Renderer.with_options(timeout=max_seconds, gpu=chosen_gpu)()
     started = time.time()
     try:
         result = renderer.render.remote(
             prompt=prompt, duration_s=duration_s, aspect_ratio=aspect_ratio,
             resolution=resolution, fps=fps, steps=steps, seed=seed,
             crf=crf, preset=preset,
+            reference_paths=reference_set.order or None,
         )
     except Exception as exc:
         spent = time.time() - started
-        print(f"\nfailed after {spent:.0f}s (at most ${spent * USD_PER_SECOND:.2f}): {exc}")
+        print(f"\nfailed after {spent:.0f}s (at most ${spent * rate:.2f}): {exc}")
         print("If that was the timeout: raise --budget-usd, or lower --steps.")
         print("If generation itself failed: modal run run.py --describe")
         raise
 
     Path(out).write_bytes(result.pop("video"))
-    _report(result, result.pop("probe"), time.time() - started, out, budget_usd)
+    _report(result, result.pop("probe"), time.time() - started, out, budget_usd, rate)
 
 
 def _probe_only():
@@ -620,13 +758,14 @@ def _describe():
     print(Renderer().describe.remote())
 
 
-def _report(result, probe, round_trip, out_path, budget_usd):
+def _report(result, probe, round_trip, out_path, budget_usd, rate=None):
+    rate = rate or USD_PER_SECOND
     stages = result["stages"]
     load = stages.get("model_load", 0.0)
     render = {k: v for k, v in stages.items() if k != "model_load"}
     render_total = sum(render.values()) or 1e-9
     billable = result["billable_s"]
-    actual = billable * USD_PER_SECOND
+    actual = billable * rate
     frames = result["out_frames"]
     video_s = result["video_s"]
 
@@ -645,23 +784,23 @@ def _report(result, probe, round_trip, out_path, budget_usd):
     print("-" * 74)
     for name, seconds in sorted(render.items(), key=lambda kv: -kv[1]):
         print(f"{name:<18}{seconds:>10.2f}{seconds / render_total * 100:>6.1f}%"
-              f"{seconds * USD_PER_SECOND:>9.4f}   {seconds / frames * 1000:>7.1f} ms")
+              f"{seconds * rate:>9.4f}   {seconds / frames * 1000:>7.1f} ms")
     print("-" * 74)
     print(f"{'render':<18}{render_total:>10.2f}{100.0:>6.1f}%"
-          f"{render_total * USD_PER_SECOND:>9.4f}")
-    print(f"{'model load':<18}{load:>10.2f}{'':>7}{load * USD_PER_SECOND:>9.4f}")
+          f"{render_total * rate:>9.4f}")
+    print(f"{'model load':<18}{load:>10.2f}{'':>7}{load * rate:>9.4f}")
     print(f"{'TOTAL':<18}{billable:>10.2f}{'':>7}{actual:>9.4f}")
 
     verdict = "UNDER" if actual <= budget_usd else "OVER"
     print(f"\nspent ${actual:.4f} of ${budget_usd:.2f} budget "
           f"({actual / budget_usd * 100:.0f}%, {verdict})")
     print(f"  per second of video      ${actual / video_s:.4f}")
-    print(f"  again on a warm container ${render_total * USD_PER_SECOND:.4f}")
+    print(f"  again on a warm container ${render_total * rate:.4f}")
     print(f"  wall clock               {round_trip:.0f}s")
     if load > render_total:
         print(f"\n  Model load ({load:.0f}s) cost more than the render ({render_total:.0f}s).")
         print(f"  Batching clips is your biggest saving -- each extra clip is "
-              f"~${render_total * USD_PER_SECOND:.4f}.")
+              f"~${render_total * rate:.4f}.")
 
     per_frame = render_total / frames
     print(f"\n{line}\nPROJECTED (linear, verify before trusting)\n{line}")
@@ -671,7 +810,7 @@ def _report(result, probe, round_trip, out_path, budget_usd):
         count = int(seconds * result["fps"])
         secs = count * per_frame
         print(f"  {label:<24}{count:>7} frames  {secs / 60:>6.1f} min  "
-              f"${secs * USD_PER_SECOND:>7.2f} warm")
+              f"${secs * rate:>7.2f} warm")
     print("\nChained clips each need their own generation pass, and H3 writes every")
     print("clip's soundtrack independently -- joins have audible ambience seams.")
     print(f"\nwrote {out_path}")

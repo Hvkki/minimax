@@ -23,13 +23,13 @@ H3 generates **768p, 24 fps, 5–15 s clips with a jointly generated stereo soun
 | `stages/generate.py` — the H3 call | **written, never executed** |
 | `run.py` — one-command orchestrator | wiring verified, generation untested |
 
-The H3 generation call is written against the published diffusers integration and model card, but running it needs ~124 GB of weights and a large GPU, so it has never been executed. If something breaks, it is almost certainly there — run `modal run run.py --describe` to dump the pipeline's real signature and compare it against what we send.
+The H3 generation call is written against the published diffusers integration and model card, but running it needs ~144 GB of weights and a large GPU, so it has never been executed. If something breaks, it is almost certainly there — run `modal run run.py --describe` to dump the pipeline's real signature and compare it against what we send.
 
 ---
 
 ## Budget warning
 
-Modal's free tier is **$30/month, but only about $1 is available until a payment method is added**. Self-hosting H3 does not fit in $1: ~90 GB of weights must be downloaded and held, and ~124 GB loaded into GPU memory on every cold start *before a single frame exists*. The model load alone can eat most of a dollar.
+Modal's free tier is **$30/month, but only about $1 is available until a payment method is added**. Self-hosting H3 does not fit in $1: ~90 GB of weights must be downloaded and held, and ~144 GB loaded into GPU memory on every cold start *before a single frame exists*. The model load alone can eat most of a dollar.
 
 With the full $30 unlocked, everything here is comfortable. On $1, use [MiniMax's hosted API](https://platform.minimax.io/) instead — no weights, no load, no storage, no territory restriction, and you get `H3-Context-IR` and native 2K, neither of which is open source. This repo's prompt builder, 60 fps conversion, upscaling and encoding all still work on top of API output.
 
@@ -118,7 +118,7 @@ Five steps, then it stops — nothing rendered, nothing left running:
 | 1 | local environment: modal version, package, credentials |
 | 2 | downloads ~90 GB of weights into a Volume, **skipped if already there** |
 | 3 | runs the unit tests **inside the container**, not just on your machine |
-| 4 | boots a B200, loads H3 (~124 GB), checks our call against the pipeline's real signature |
+| 4 | boots a B200, loads H3 (~144 GB), checks our call against the pipeline's real signature |
 | 5 | prints a PASS/FAIL table, the spend, and the next command |
 
 Step 4 is the valuable one: it catches a diffusers signature drift for the price of a model load instead of halfway through a paid render.
@@ -149,7 +149,7 @@ Ready-made notebooks — pick one:
 
 **On Kaggle, two settings matter before you run anything:** *Settings → Internet* must be **ON** (off by default, and nothing can reach Modal or PyPI without it), and *Settings → Accelerator* should be **None** — Kaggle's own GPU is not used, so attaching one only burns your quota.
 
-Kaggle's 16 GB T4/P100, ~30 GB RAM and disk quota cannot hold H3's ~124 GB of weights; even the int8 path needs ~75 GB of host RAM. So Kaggle is the client and **Modal supplies the GPU**. Credentials come from *Add-ons → Secrets* (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`) rather than being typed into a cell, and output is written to `/kaggle/working` so it shows up in the Output tab.
+Kaggle's 16 GB T4/P100, ~30 GB RAM and disk quota cannot hold H3's ~144 GB of weights; even the int8 path needs ~75 GB of host RAM. So Kaggle is the client and **Modal supplies the GPU**. Credentials come from *Add-ons → Secrets* (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`) rather than being typed into a cell, and output is written to `/kaggle/working` so it shows up in the Output tab.
 
 ### By hand
 
@@ -179,6 +179,45 @@ path, report = notebook.render()
 
 Nothing runs on the notebook's own machine, so a free Colab runtime is enough — the GPU is Modal's.
 
+
+## Multimodal references (12 files)
+
+`ref2va` conditions on an **ordered** mix of media:
+
+```bash
+modal run run.py --refs "hero.png,pose.png,style.png,motion.mp4,voice.wav"
+modal run run.py --images "a.png,b.png" --videos "clip.mp4" --audios "voice.wav"
+```
+
+| Input | Limit |
+|---|---|
+| Images | ≤ 9 |
+| Videos | ≤ 3, each 2–15 s, total ≤ 15 s |
+| Audio | ≤ 3, each 2–15 s, **never alone** |
+| Total | ≤ 12 files |
+
+Every limit is checked **locally before a GPU boots**, so a bad set costs nothing.
+
+**Order is semantic.** It sets the `<Picture N>` / `<Video N>` / `<Audio N>` labels and each reference's place on the shared rotary clock — reordering the same files is a different request, not a cosmetic change.
+
+One or two bare images stay on the cheaper `fl2va` path (they're keyframes, not references). Three or more, or any video/audio, promotes to `ref2va` and its separate 66.3 GB partition.
+
+### Real weight sizes
+
+Measured from the Hugging Face manifest, not from documentation — the docs' "61.7 / 62.1 GB" figures are low:
+
+| Component | GB |
+|---|---|
+| `transformer/` (t2va, fl2va) | 66.28 |
+| `transformer_ref/` (ref2va) | 66.28 |
+| `text_encoder/` (Qwen3-VL) | 66.73 |
+| `vae/` | 10.42 |
+| `audio_vae/` + tokenizer | 0.63 |
+| **One workflow** | **144.06** |
+| **Both partitions** | **210.34** |
+
+That's why B300 is the default: 210 GB does not fit a B200's 180 GB, and even one workflow leaves a B200 only ~36 GB for activations.
+
 ## Cost
 
 Modal bills `gpu="B200+"` at the **B200 rate of $6.25/hr** ($0.001736/s) even when it lands on a B300. So:
@@ -191,7 +230,7 @@ Modal bills `gpu="B200+"` at the **B200 rate of $6.25/hr** ($0.001736/s) even wh
 
 `--budget-usd` converts your budget into a hard container timeout, so an overrun gets killed rather than billed. Default is $1.00.
 
-**The wildcard is the cold start.** Loading ~124 GB (61.7 GB transformer + 62.1 GB Qwen3-VL conditioner) happens before a single frame is generated, and nobody can predict it without measuring — that is what `probe_load` is for. A warm container within `scaledown_window` (300 s) skips it entirely, so **batching clips is the single biggest saving**.
+**The wildcard is the cold start.** Loading ~144 GB happens before a single frame is generated, and nobody can predict it without measuring — that is what `probe_load` is for. A warm container within `scaledown_window` (300 s) skips it entirely, so **batching clips is the single biggest saving**.
 
 `min_containers=0` is deliberate. Keeping one B200 warm around the clock is roughly **$150/day ≈ $4,500/month**.
 
@@ -229,18 +268,19 @@ Modal bills `gpu="B200+"` at the **B200 rate of $6.25/hr** ($0.001736/s) even wh
 
 ## Hardware
 
-One workflow in bf16 is ~124 GB.
+One workflow in bf16 is ~144 GB.
 
 | Setup | Works? | Notes |
 |---|---|---|
-| 1x B200 (180 GB) / B300 (288 GB) | yes | resident, no offload; `B200+` is billed as B200 |
+| 1x B300 (288 GB) | yes | **recommended** — 144 GB spare, and the only card that fits both partitions |
+| 1x B200 (180 GB) | tight | 144 GB of weights leaves ~36 GB for activations |
 | 1x 80 GB (A100/H100) | yes | CPU offload, slower |
 | 24–32 GB consumer | yes | int8 + block streaming, needs **~75 GB system RAM** |
 | < 24 GB or CPU only | no | there is no usable CPU path for a 33B video transformer |
 
 `gpu="B200+"` can land on a B300, which **requires CUDA 13.1+** — the Modal image uses the cu130 torch index. Set `GIGGSDANCE_GPU=B200` if scheduling fails.
 
-`ref2va` chaining needs the second transformer partition (+61.7 GB → ~186 GB) and so needs a B300; `fl2va` chaining uses one partition and fits a B200.
+`ref2va` chaining needs the second transformer partition (+66.3 GB → ~210 GB) and so needs a B300; `fl2va` chaining uses one partition and fits a B200.
 
 ---
 

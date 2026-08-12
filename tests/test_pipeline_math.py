@@ -304,3 +304,95 @@ def test_native_never_triggers_a_super_resolution_pass():
     out_w, out_h = resolve_target("native", 1344, 768)
     crop_h = plan_geometry(1344, 768, out_w, out_h, 2).crop_height
     assert pick_scale(crop_h, out_h) == 1
+
+
+
+# ---------------------------------------------------------------------------
+# Multimodal references (ref2va): 9 images / 3 videos / 3 audio / 12 total
+# ---------------------------------------------------------------------------
+
+from giggsdance.references import (  # noqa: E402
+    MAX_TOTAL,
+    ReferenceError,
+    ReferenceSet,
+    build_reference_set,
+    check_clip_durations,
+    classify,
+)
+
+
+def test_the_documented_maximum_set_is_accepted():
+    """9 + 2 + 1 = 12, the largest legal combination."""
+    refs = build_reference_set(
+        images=[f"i{n}.png" for n in range(9)],
+        videos=["a.mp4", "b.mp4"],
+        audios=["v.wav"],
+    )
+    assert refs.total == MAX_TOTAL == 12
+    assert refs.workflow == "ref2va"
+
+
+@pytest.mark.parametrize(
+    "kwargs,reason",
+    [
+        ({"images": ["x.png"] * 10}, "at most 9"),
+        ({"videos": ["v.mp4"] * 4}, "at most 3"),
+        ({"images": ["i.png"], "audios": ["a.wav"] * 4}, "at most 3"),
+        ({"images": ["i.png"] * 9, "videos": ["v.mp4"] * 3, "audios": ["a.wav"] * 3},
+         "at most 12"),
+    ],
+)
+def test_over_limit_sets_are_rejected(kwargs, reason):
+    with pytest.raises(ReferenceError, match=reason):
+        build_reference_set(**kwargs)
+
+
+def test_audio_alone_is_rejected():
+    """Audio never reaches the text encoder, so it has nothing to attach to."""
+    with pytest.raises(ReferenceError, match="cannot be the only input"):
+        build_reference_set(audios=["voice.wav"])
+    # Paired with an image it is fine.
+    assert build_reference_set(images=["face.png"], audios=["voice.wav"]).total == 2
+
+
+def test_workflow_is_inferred_and_keyframes_stay_on_the_cheap_partition():
+    """1-2 bare images are keyframes (fl2va, transformer/). More needs ref2va."""
+    assert build_reference_set().workflow == "t2va"
+    assert build_reference_set(images=["a.png"]).workflow == "fl2va"
+    assert build_reference_set(images=["a.png", "b.png"]).workflow == "fl2va"
+    assert build_reference_set(images=["a.png", "b.png", "c.png"]).workflow == "ref2va"
+    assert build_reference_set(videos=["v.mp4"]).workflow == "ref2va"
+
+
+def test_mixed_list_preserves_order_because_order_is_semantic():
+    refs = build_reference_set(mixed=["b.mp4", "a.png", "s.wav", "c.png"])
+    assert refs.order == [
+        ("video", "b.mp4"), ("image", "a.png"),
+        ("audio", "s.wav"), ("image", "c.png"),
+    ]
+
+
+def test_modality_is_classified_from_extension():
+    assert classify("x.PNG") == "image"
+    assert classify("clip.mov") == "video"
+    assert classify("track.flac") == "audio"
+    with pytest.raises(ReferenceError, match="cannot tell what"):
+        classify("mystery.xyz")
+
+
+@pytest.mark.parametrize(
+    "durations,ok",
+    [([2.0], True), ([15.0], True), ([1.9], False), ([15.1], False),
+     ([5.0, 5.0, 4.0], True), ([8.0, 8.0], False)],
+)
+def test_clip_duration_rules(durations, ok):
+    if ok:
+        check_clip_durations(durations)
+    else:
+        with pytest.raises(ReferenceError):
+            check_clip_durations(durations)
+
+
+def test_empty_set_is_text_to_video():
+    refs = ReferenceSet()
+    assert refs.is_empty and refs.total == 0 and refs.workflow == "t2va"
