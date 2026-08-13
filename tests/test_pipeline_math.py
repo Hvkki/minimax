@@ -396,3 +396,104 @@ def test_clip_duration_rules(durations, ok):
 def test_empty_set_is_text_to_video():
     refs = ReferenceSet()
     assert refs.is_empty and refs.total == 0 and refs.workflow == "t2va"
+
+
+
+# ---------------------------------------------------------------------------
+# SGLang backend: conditions mapping, quality modes, serve command
+# ---------------------------------------------------------------------------
+
+from giggsdance.backends.sglang_client import (  # noqa: E402
+    TURBO_LORAS,
+    QualityMode,
+    RenderRequest,
+    Target,
+    build_conditions,
+    build_serve_command,
+    steps_for,
+)
+
+
+def test_fl2va_maps_images_to_first_and_last_keyframes():
+    """fl2va images are literal endpoints; supported index sets are [0] and [0,-1]."""
+    one = build_conditions(build_reference_set(images=["a.png"]), "fl2va")
+    assert [c["frame_index"] for c in one] == [0]
+    assert one[0]["role"] == "keyframe"
+
+    two = build_conditions(build_reference_set(images=["a.png", "b.png"]), "fl2va")
+    assert [c["frame_index"] for c in two] == [0, -1]
+
+
+def test_fl2va_refuses_more_than_two_keyframes():
+    refs = build_reference_set(images=["a.png", "b.png", "c.png"])
+    with pytest.raises(ValueError, match="at most 2 keyframes"):
+        build_conditions(refs, "fl2va")
+
+
+def test_ref2va_maps_all_twelve_in_order():
+    """Order must survive: it drives the <Picture N>/<Video N>/<Audio N> tags."""
+    paths = [f"i{n}.png" for n in range(9)] + ["m.mp4", "m2.mp4", "v.wav"]
+    refs = build_reference_set(mixed=paths)
+    conditions = build_conditions(refs, "ref2va")
+
+    assert len(conditions) == 12
+    assert all(c["role"] == "reference" for c in conditions)
+    assert [c["type"] for c in conditions] == ["image"] * 9 + ["video"] * 2 + ["audio"]
+    assert [Path(c["uri"]).name for c in conditions] == paths
+
+
+def test_local_paths_become_file_uris_and_urls_pass_through():
+    refs = build_reference_set(mixed=["local.png", "https://example.com/remote.png"])
+    conditions = build_conditions(refs, "ref2va")
+    assert conditions[0]["uri"].startswith("file://")
+    assert conditions[1]["uri"] == "https://example.com/remote.png"
+
+
+def test_text_only_produces_no_conditions():
+    assert build_conditions(build_reference_set(), "t2va") == []
+
+
+def test_turbo_step_counts_match_the_documented_recipes():
+    """SGLang counts sigma grid points including the terminal zero, so a
+    4-evaluation adapter is configured as 5 and an 8-evaluation one as 9."""
+    assert steps_for(QualityMode.LOSSLESS, "lightx2v") == 5
+    assert steps_for(QualityMode.LOSSLESS, "larryvrh") == 9
+    assert steps_for(QualityMode.LOSSLESS, None) == 50
+    assert TURBO_LORAS["lightx2v"]["lora_alpha"] == 8  # absent from checkpoint metadata
+
+
+def test_quality_field_is_only_sent_for_validated_levels():
+    assert RenderRequest(prompt="x", quality=QualityMode.HIGH).to_payload()["quality"] == "high"
+    assert RenderRequest(prompt="x").to_payload()["quality"] == "lossless"
+    # TURBO is a LoRA, not a quality level; it must not be sent as one.
+    assert "quality" not in RenderRequest(prompt="x", quality=QualityMode.TURBO).to_payload()
+
+
+def test_target_payload_shape():
+    payload = Target(duration_seconds=10.0, aspect_ratio="9:16", short_edge=768).to_payload()
+    assert payload == {"short_edge": 768, "aspect_ratio": "9:16", "duration_seconds": 10.0}
+
+
+def test_serve_command_defaults_are_the_lossless_ones():
+    command = build_serve_command("/weights/MiniMax-H3", variant="ref2va", num_gpus=4)
+    joined = " ".join(command)
+    assert "--performance-mode speed" in joined       # resident, eager
+    assert "--ulysses-degree 4" in joined             # pure Ulysses
+    assert "--warmup-resolutions 1344x768" in joined  # removes ~10s first-request cost
+    assert "--quantization" not in joined             # FP8 is opt-in, not default
+    assert "--model-variant ref2va" in joined
+
+
+def test_fp8_and_lora_are_opt_in():
+    fp8 = " ".join(build_serve_command("/w", quantize_fp8=True))
+    assert "--quantization fp8" in fp8
+
+    turbo = " ".join(build_serve_command("/w", lora="lightx2v"))
+    assert "lightx2v/Minimax-h3-Turbo" in turbo
+    assert "--lora-alpha 8" in turbo
+
+    # larryvrh publishes its alpha, so none should be forced
+    assert "--lora-alpha" not in " ".join(build_serve_command("/w", lora="larryvrh"))
+
+    with pytest.raises(ValueError, match="unknown LoRA"):
+        build_serve_command("/w", lora="nonexistent")

@@ -180,6 +180,61 @@ path, report = notebook.render()
 Nothing runs on the notebook's own machine, so a free Colab runtime is enough — the GPU is Modal's.
 
 
+
+## Backends: SGLang is the fast path
+
+| | diffusers (`run.py`) | **SGLang (`serve.py`)** | vLLM-Omni |
+|---|---|---|---|
+| Speed | baseline | **1.41x** | similar |
+| 12 references | via package API | **yes** | **no** — 1 image + 1 audio only |
+| Turbo LoRAs | manual | **documented recipes** | — |
+| Quality edge | no H.264 round-trip | one extra decode | — |
+
+```bash
+modal run serve.py                                   # 5 s, lossless
+modal run serve.py --refs "a.png,b.png,clip.mp4,v.wav"   # up to 12 references
+modal run serve.py --gpus 4                          # lossless, ~5x faster
+modal run serve.py --lora lightx2v                   # ~10x fewer evaluations
+```
+
+vLLM-Omni's documented reference limit is **one image plus one audio**, or videos with no separate audio. If you need the 12-file omni-reference set, SGLang is the only option.
+
+### Measured latency — SGLang's own 8x B300 sweep
+
+1344x768, 124 frames (5.17 s), 50 steps:
+
+| Weights | Precision | Latency | Load | Peak/GPU |
+|---|---|---|---|---|
+| FL2VA | BF16 | **19.04 s** | 118 s | 83.6 GB |
+| FL2VA | FP8 | 18.03 s | 116 s | 51.9 GB |
+| Ref2VA | BF16 | **29.12 s** | 114 s | 84.0 GB |
+
+**Cold start is ~114–124 s.** References cost **1.53x**. Scaling 8→1 GPU is ~5.2–5.8x (from AMD's published GPU-count sweep), so a single B300 is roughly **100–110 s at 50 steps, ~17–20 s at 8**.
+
+### Quantization: don't
+
+FP8 on a B300 measured **19.04 → 18.03 s — 5%** — while cutting memory 38%. It's a *capacity* tool for cards that can't hold the weights, and it is **not bit-exact**. With 288 GB you don't need it.
+
+**Lossless, and on by default:**
+
+| | Effect |
+|---|---|
+| `--performance-mode speed` | resident components, eager BF16/FP32 |
+| pure Ulysses (`--gpus N`) | faster *and* the capacity default |
+| VAE patch parallelism, tile | cuts decode **3.4–3.5x** |
+| warmup matched to resolution | removes ~10 s of first-request cost |
+
+**Not lossless, opt-in:**
+
+| | Cost |
+|---|---|
+| `--quality high` | 1.40x, SSIM 0.931 / PSNR 28.16 dB |
+| `--lora lightx2v` | 4 evals vs 50 — a *different model*, not the same clip faster |
+| `--quantize-fp8` | not bit-exact, ~5% |
+| torch.compile | changes numerical output — never enabled here |
+
+**For no quality loss, speed comes from GPU count, not precision.** `--gpus 4` is lossless and roughly 5x.
+
 ## Multimodal references (12 files)
 
 `ref2va` conditions on an **ordered** mix of media:
