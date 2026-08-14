@@ -181,6 +181,73 @@ Nothing runs on the notebook's own machine, so a free Colab runtime is enough �
 
 
 
+
+## HTTP API — permanent HTTPS, no ngrok
+
+```bash
+modal secret create giggsdance-api API_KEY=$(openssl rand -hex 32)
+modal run serve_api.py        # prefetch weights so the first call isn't a 144 GB download
+modal deploy serve_api.py     # permanent URL
+```
+
+You get `https://<workspace>--giggsdance-api-fastapi-app.modal.run`.
+
+**ngrok is not needed and would not help.** ngrok exposes a server on *your own machine*; nothing here runs there. Modal serves this over public HTTPS with a real certificate. If you ever want a raw TCP tunnel — to reach SGLang's own port, say — Modal has `modal.forward(port)` built in at no extra charge.
+
+| Endpoint | |
+|---|---|
+| `GET /health` | no auth, readiness |
+| `GET /` | capabilities and real limits |
+| `POST /uploads` | multipart → a URI usable as a reference |
+| `POST /render` | → `{ job_id }` (202) |
+| `GET /jobs/{id}` | status, stage timings, measured cost |
+| `GET /jobs/{id}/file` | the mp4 |
+| `GET /jobs` · `DELETE /jobs/{id}` | list · cancel/delete |
+
+All but `/health` need `X-API-Key`, compared with `compare_digest`.
+
+```bash
+URL=https://<workspace>--giggsdance-api-fastapi-app.modal.run
+KEY=<your key>
+
+JOB=$(curl -sS -X POST $URL/render -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{
+    "prompt": "a lighthouse at dusk, beam sweeping through sea mist",
+    "duration_s": 5, "resolution": "native", "fps": 60
+  }' | jq -r .job_id)
+
+curl -sS $URL/jobs/$JOB -H "X-API-Key: $KEY" | jq
+curl -sS $URL/jobs/$JOB/file -H "X-API-Key: $KEY" -o out.mp4
+```
+
+With references (order is semantic — it sets the `<Picture N>`/`<Video N>`/`<Audio N>` tags):
+
+```jsonc
+{
+  "prompt": "...",
+  "gpus": 4,                     // lossless ~5x
+  "quality": "lossless",         // or "high": 1.40x, SSIM 0.931
+  "lora": "none",                // or "lightx2v": 4 evals, a different model
+  "references": [
+    {"type": "image", "uri": "https://.../hero.png"},
+    {"type": "video", "uri": "https://.../motion.mp4"},
+    {"type": "audio", "uri": "https://.../voice.wav"}
+  ]
+}
+```
+
+### Design notes
+
+**Async by necessity.** A 15 s Ref2VA clip measured 784 s on 4× B300. No HTTP request survives that, so it's submit → poll → download.
+
+**The web container has no torch.** FastAPI runs on CPU and `spawn()`s the GPU. Serving JSON from the B300 would bill $7.10/hr to answer HTTP; the API image omits torch entirely so it cold-starts in seconds.
+
+**Validation happens on CPU.** An illegal reference set — 13 files, 10 images, audio alone — is rejected with 422 *before* a GPU is spawned, so a bad request costs nothing.
+
+**`max_containers=2`** caps simultaneous GPU spend. H3 does one generation per diffusion batch, so requests queue rather than fanning out.
+
+**Results expire after 48 h.** A scheduled `prune` deletes old files — a 15 s 1440p clip is >100 MB, and Volume storage otherwise becomes the biggest line on the bill.
+
 ## Backends: SGLang is the fast path
 
 | | diffusers (`run.py`) | **SGLang (`serve.py`)** | vLLM-Omni |
